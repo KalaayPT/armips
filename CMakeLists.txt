@@ -204,6 +204,9 @@ armips_target_sources(armips PRIVATE
 	Util/FileSystem.h
 	Util/Util.cpp
 	Util/Util.h
+
+	ffi/armips_ffi.h
+	ffi/armips_ffi.cpp
 )
 
 if (ARMIPS_PRECOMPILE_HEADERS)
