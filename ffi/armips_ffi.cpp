@@ -104,7 +104,7 @@ int armips_assemble(const ArmipsFFIArgs* args) {
     }
 
     // Copy errors to output
-    if (!error_list.empty() && args->errors) {
+    if (!error_list.empty()) {
         const_cast<ArmipsFFIArgs*>(args)->error_count = error_list.size();
         const_cast<ArmipsFFIArgs*>(args)->errors =
             (char**)malloc(sizeof(char*) * error_list.size());
