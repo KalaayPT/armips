@@ -17,6 +17,29 @@
 #include <cstdlib>
 #endif
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
+
+// The FFI receives paths as UTF-8. On Windows, constructing an fs::path from a
+// narrow string decodes it with the ANSI code page instead of UTF-8, which
+// breaks any path containing non-ASCII characters (e.g. "Pokémon"). Convert
+// explicitly so such paths work.
+static fs::path path_from_utf8(const char* str) {
+#ifdef _WIN32
+    int len = MultiByteToWideChar(CP_UTF8, 0, str, -1, nullptr, 0);
+    if (len > 1) {
+        std::wstring wide(static_cast<size_t>(len) - 1, L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, str, -1, wide.data(), len);
+        return fs::path(std::move(wide));
+    }
+    return fs::path();
+#else
+    return fs::path(str);
+#endif
+}
+
 // Helper to split "NAME=VALUE" into components
 static bool parse_define(const char* def, std::string& name, std::string& value, bool& is_label) {
     const char* eq = strchr(def, '=');
@@ -41,66 +64,85 @@ int armips_assemble(const ArmipsFFIArgs* args) {
         return 1;
     }
 
+    // Collect errors
+    std::vector<std::string> error_list;
+
     // Change working directory if specified
     fs::path old_path;
     if (args->working_dir) {
-        old_path = fs::current_path();
         std::error_code ec;
-        fs::current_path(args->working_dir, ec);
+        old_path = fs::current_path(ec);
+        if (!ec) {
+            fs::current_path(path_from_utf8(args->working_dir), ec);
+        }
         if (ec) {
-            // Can't really report this error through the FFI
-            return 1;
+            error_list.push_back(std::string("Could not change working directory to '") +
+                                 args->working_dir + "': " + ec.message());
         }
     }
 
-    // Set up arguments
-    ArmipsArguments settings;
-    settings.inputFileName = args->input_file;
-    settings.silent = args->silent != 0;
-    settings.errorOnWarning = args->error_on_warning != 0;
-    settings.showStats = args->show_stats != 0;
+    bool success = false;
+    if (error_list.empty()) {
+        // Set up arguments
+        ArmipsArguments settings;
+        settings.inputFileName = path_from_utf8(args->input_file);
+        settings.silent = args->silent != 0;
+        settings.errorOnWarning = args->error_on_warning != 0;
+        settings.showStats = args->show_stats != 0;
 
-    if (args->temp_file) {
-        settings.tempFileName = args->temp_file;
-    }
-
-    if (args->sym_file) {
-        settings.symFileName = args->sym_file;
-        settings.symFileVersion = args->sym_version;
-    }
-
-    // Collect errors
-    std::vector<std::string> error_list;
-    settings.errorsResult = &error_list;
-
-    // Parse defines
-    for (size_t i = 0; i < args->define_count; i++) {
-        std::string name, value;
-        bool is_label;
-
-        if (!parse_define(args->defines[i], name, value, is_label)) {
-            error_list.push_back(std::string("Invalid define: ") + args->defines[i]);
-            continue;
+        if (args->temp_file) {
+            settings.tempFileName = path_from_utf8(args->temp_file);
         }
 
-        Identifier id(name);
+        if (args->sym_file) {
+            settings.symFileName = path_from_utf8(args->sym_file);
+            settings.symFileVersion = args->sym_version;
+        }
 
-        if (is_label) {
-            // It's a label definition
-            int64_t val = strtoll(value.c_str(), nullptr, 0);
-            settings.labels.emplace_back(LabelDefinition{id, val});
-        } else {
-            // It's an equation
-            settings.equList.emplace_back(EquationDefinition{id, value});
+        settings.errorsResult = &error_list;
+
+        // Parse defines
+        for (size_t i = 0; i < args->define_count; i++) {
+            std::string name, value;
+            bool is_label;
+
+            if (!parse_define(args->defines[i], name, value, is_label)) {
+                error_list.push_back(std::string("Invalid define: ") + args->defines[i]);
+                continue;
+            }
+
+            Identifier id(name);
+
+            if (is_label) {
+                // It's a label definition
+                int64_t val = strtoll(value.c_str(), nullptr, 0);
+                settings.labels.emplace_back(LabelDefinition{id, val});
+            } else {
+                // It's an equation
+                settings.equList.emplace_back(EquationDefinition{id, value});
+            }
+        }
+
+        // Run assembler
+        success = runArmips(settings);
+
+        // runArmips has early failure exits that bypass the errorsResult copy;
+        // recover any diagnostics it left in the logger so a failure is never
+        // reported without a reason.
+        if (!success && error_list.empty()) {
+            for (const std::string& err : Logger::getErrors()) {
+                error_list.push_back(err);
+            }
+        }
+        if (!success && error_list.empty()) {
+            error_list.push_back("Assembly failed for an unknown reason");
         }
     }
-
-    // Run assembler
-    bool success = runArmips(settings);
 
     // Restore working directory
     if (!old_path.empty()) {
-        fs::current_path(old_path);
+        std::error_code ec;
+        fs::current_path(old_path, ec);
     }
 
     // Copy errors to output
