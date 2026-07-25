@@ -175,6 +175,18 @@ bool runArmips(ArmipsArguments& settings)
 	Logger::setSilent(settings.silent);
 	Logger::setErrorOnWarning(settings.errorOnWarning);
 
+	// Every exit path must hand the logged diagnostics back to the caller,
+	// otherwise failures are reported without any error message
+	auto collectErrors = [&settings]()
+	{
+		if (settings.errorsResult != nullptr)
+		{
+			std::vector<std::string> errors = Logger::getErrors();
+			for (size_t i = 0; i < errors.size(); i++)
+				settings.errorsResult->push_back(errors[i]);
+		}
+	};
+
 	if (!settings.symFileName.empty())
 		symData.setNocashSymFileName(settings.symFileName, settings.symFileVersion);
 
@@ -194,17 +206,21 @@ bool runArmips(ArmipsArguments& settings)
 	}
 
 	if (Logger::hasError())
+	{
+		collectErrors();
 		return false;
+	}
 
 	// run assembler
 	TextFile input;
 	switch (settings.mode)
 	{
 	case ArmipsMode::FILE:
-		Global.memoryMode = false;		
+		Global.memoryMode = false;
 		if (!input.open(settings.inputFileName,TextFile::Read))
 		{
 			Logger::printError(Logger::Error, "Could not open file");
+			collectErrors();
 			return false;
 		}
 		break;
@@ -230,12 +246,7 @@ bool runArmips(ArmipsArguments& settings)
 	}
 
 	// return errors
-	if (settings.errorsResult != nullptr)
-	{
-		std::vector<std::string> errors = Logger::getErrors();
-		for (size_t i = 0; i < errors.size(); i++)
-			settings.errorsResult->push_back(errors[i]);
-	}
+	collectErrors();
 
 	if (settings.showStats)
 		printStats(Allocations::collectStats());
